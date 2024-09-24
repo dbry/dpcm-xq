@@ -55,7 +55,7 @@ struct dpcm_state {
 };
 
 static const char *sign_on = "\n"
-" DPCM-XQ  Xtreme Quality Raw DPCM Encoder / Decoder  Version 0.1\n"
+" DPCM-XQ  Xtreme Quality Raw DPCM Encoder / Decoder  Version 0.2\n"
 " Copyright (c) 2024 David Bryant. All Rights Reserved.\n\n";
 
 static const char *usage =
@@ -269,7 +269,7 @@ int main (int argc, char **argv)
     return 0;
 }
 
-static int16_t dpcm_decode_sample (struct dpcm_state *pchan, int8_t value)
+static inline int16_t dpcm_decode_sample (struct dpcm_state *pchan, int8_t value)
 {
     pchan->pcmprev = pchan->pcmdata;
 
@@ -315,6 +315,7 @@ static rms_error_t dpcm_min_error (const struct dpcm_state *pchan, int32_t csamp
 {
     int32_t sample_delta = csample - pchan->pcmdata, csample2;
     int16_t best_sync_value, best_delta_value = -128;
+    int16_t trial_values [7], trial_count = 0;
     struct dpcm_state chan = *pchan;
     rms_error_t min_error;
     int8_t value;
@@ -326,6 +327,12 @@ static rms_error_t dpcm_min_error (const struct dpcm_state *pchan, int32_t csamp
     else
         value = best_sync_value = nearest_0_index [csample];
 
+    if (best_sync_value > -126)
+        trial_values [trial_count++] = best_sync_value - 2;
+
+    if (best_sync_value < 126)
+        trial_values [trial_count++] = best_sync_value + 2;
+
     if (pchan->state != STATE_INIT) {
         if (csample < -32768)
             best_delta_value = -127;
@@ -334,8 +341,26 @@ static rms_error_t dpcm_min_error (const struct dpcm_state *pchan, int32_t csamp
         else
             best_delta_value = nearest_1_index [sample_delta];
 
-        if (abs (decode_index [best_delta_value] - sample_delta) < abs (decode_index [value] - csample))
+        if (best_delta_value > -127) {
+            trial_values [trial_count++] = best_delta_value - 2;
+
+            if (best_delta_value > -125)
+                trial_values [trial_count++] = best_delta_value - 4;
+        }
+
+        if (best_delta_value < 127) {
+            trial_values [trial_count++] = best_delta_value + 2;
+
+            if (best_delta_value < 125)
+                trial_values [trial_count++] = best_delta_value + 4;
+        }
+
+        if (abs (decode_index [best_delta_value] - sample_delta) < abs (decode_index [value] - csample)) {
+            trial_values [trial_count++] = best_sync_value;
             value = best_delta_value;
+        }
+        else
+            trial_values [trial_count++] = best_delta_value;
     }
 
     if (best) *best = value;
@@ -357,41 +382,32 @@ static rms_error_t dpcm_min_error (const struct dpcm_state *pchan, int32_t csamp
 
     min_error += dpcm_min_error (&chan, csample2, psample + chan.nchans, NULL, depth - 1, max_error - min_error);
 
-    for (int16_t tvalue = -127; tvalue <= 127; ++tvalue) {
+    for (int tindex = 0; tindex < trial_count; ++tindex) {
         rms_error_t error, threshold;
 
-        if (tvalue == value)        // don't try the same value again...
-            continue;
+        chan = *pchan;
+        error = dpcm_decode_sample (&chan, trial_values [tindex]) - csample;
+        error = error * error;
+        threshold = max_error < min_error ? max_error : min_error;
 
-        if (tvalue == best_sync_value               ||              // from best delta to best sync value
-            tvalue == best_delta_value              ||              // from best sync to best delta value
-            abs (best_sync_value - tvalue) == 2     ||              // to next higher or next lower sync value
-            abs (best_delta_value - tvalue) == 2    ||              // to next higher or next lower delta value
-            (value & 1 && abs (best_delta_value - tvalue) == 4)) {  // from best delta value to best value += 4
-                chan = *pchan;
-                error = dpcm_decode_sample (&chan, tvalue) - csample;
-                error = error * error;
-                threshold = max_error < min_error ? max_error : min_error;
-
-                if (error < threshold) {
-                    if (chan.weight | chan.error) {
-                        chan.error += chan.pcmdata;
-                        csample2 = noise_shape (&chan, psample [chan.nchans]);
-                    }
-                    else
-                        csample2 = psample [chan.nchans];
-
-                    error += dpcm_min_error (&chan, csample2, psample + chan.nchans, NULL, depth - 1, threshold - error);
-
-                    if (error < min_error) {
-                        if (best) *best = tvalue;
-                        min_error = error;
-                    }
-                }
+        if (error < threshold) {
+            if (chan.weight | chan.error) {
+                chan.error += chan.pcmdata;
+                csample2 = noise_shape (&chan, psample [chan.nchans]);
             }
+            else
+                csample2 = psample [chan.nchans];
+
+            error += dpcm_min_error (&chan, csample2, psample + chan.nchans, NULL, depth - 1, threshold - error);
+
+            if (error < min_error) {
+                if (best) *best = trial_values [tindex];
+                min_error = error;
+            }
+        }
     }
 
-    if (best) {
+    if (best && verbosity > 0) {
         ++num_trials;
         if (*best != value) {
             ++num_improvements;
