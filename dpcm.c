@@ -334,9 +334,9 @@ static rms_error_t dpcm_min_error (const struct dpcm_state *pchan, int32_t csamp
         trial_values [trial_count++] = best_sync_value + 2;
 
     if (pchan->state != STATE_INIT) {
-        if (csample < -32768)
+        if (sample_delta < -32768)
             best_delta_value = -127;
-        else if (csample > 32767)
+        else if (sample_delta > 32767)
             best_delta_value = 127;
         else
             best_delta_value = nearest_1_index [sample_delta];
